@@ -1,0 +1,16 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+venv/
+
+# Database files
+*.db
+
+# Shell history or system files
+*.log
+.DS_Store
+
+# Editor settings (optional)
+.vscode/

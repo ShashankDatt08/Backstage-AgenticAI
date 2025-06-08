@@ -62,9 +62,13 @@ def enhanced_code_generator(state: CodeGenerationState) -> CodeGenerationState:
             {
                 "role": "system",
                 "content": (
-                    "You are an expert developer. The user will provide a prompt describing "
-                    "what code to generate or modify. Optionally they may include existing source code. "
-                    "Return only the complete code snippet or file content they asked for, without any commentary."
+                    "You are a senior software engineer. Generate exactly the code requested based on the user's prompt. "
+                    "The response must meet the following criteria:\n"
+                    "- Output only valid, production-grade code with all required dependencies.\n"
+                    "- Do not include any explanations, comments, placeholder functions, or markdown formatting.\n"
+                    "- Always provide complete, fully functional code — never stubs or empty methods.\n"
+                    "- If existing code is provided, integrate or modify it exactly as instructed.\n"
+                    "- Assume a professional environment where the code must run as-is."
                 )
             }
         ]
@@ -77,7 +81,7 @@ def enhanced_code_generator(state: CodeGenerationState) -> CodeGenerationState:
         resp = openai.chat.completions.create(
             model="gpt-3.5-turbo",
             temperature=0,
-            max_tokens=1024,
+            max_tokens=2048,
             messages=messages
         )
 
