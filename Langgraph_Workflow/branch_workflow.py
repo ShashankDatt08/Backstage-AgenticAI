@@ -4,7 +4,6 @@ import tempfile
 import shutil
 from typing import TypedDict, Dict, Any
 
-
 GIT_PAT = os.getenv("GIT_PAT")
 GIT_USERNAME = os.getenv("GIT_USERNAME", "x-access-token")
 if not GIT_PAT:
@@ -20,13 +19,13 @@ class BranchState(TypedDict):
     error_message: str
 
 def run_branch_creation_workflow(data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    1. Embed PAT into the HTTPS URL
-    2. Clone the repo at data['git_url'] on data['base_branch']
-    3. Create + checkout feature/ai-{ticket_key}
-    4. Push that branch to origin
-    """
-    original_url = data["git_url"]
+    original_url = data["git_url"].strip()
+
+    if original_url.endswith("/"):
+        original_url = original_url[:-1]
+    if not original_url.lower().endswith(".git"):
+        original_url += ".git"
+
     if original_url.startswith("https://"):
         auth_url = original_url.replace(
             "https://",
@@ -49,16 +48,25 @@ def run_branch_creation_workflow(data: Dict[str, Any]) -> Dict[str, Any]:
         temp_dir = tempfile.mkdtemp()
         repo_path = os.path.join(temp_dir, "repo")
         subprocess.run(
-            ["git", "clone", "--branch", state["base_branch"], "--depth", "1", state["git_url"], repo_path],
+            ["git", "clone", "--depth", "1", state["git_url"], repo_path],
             check=True, capture_output=True, text=True, timeout=120
         )
         state["repository_path"] = repo_path
 
-        subprocess.run(
-            ["git", "checkout", "-b", state["branch_name"]],
-            cwd=repo_path,
-            check=True, capture_output=True, text=True
-        )
+        try:
+            subprocess.run(
+                ["git", "checkout", "-b", state["branch_name"], state["base_branch"]],
+                cwd=repo_path,
+                check=True, capture_output=True, text=True
+            )
+        except subprocess.CalledProcessError as cpe:
+            alt = "master" if state["base_branch"] == "main" else "main"
+            subprocess.run(
+                ["git", "checkout", "-b", state["branch_name"], alt],
+                cwd=repo_path,
+                check=True, capture_output=True, text=True
+            )
+            state["base_branch"] = alt
 
         subprocess.run(
             ["git", "push", "--set-upstream", "origin", state["branch_name"]],
@@ -67,9 +75,19 @@ def run_branch_creation_workflow(data: Dict[str, Any]) -> Dict[str, Any]:
         )
 
         state["status"] = "Completed"
+
+    except subprocess.CalledProcessError as cpe:
+        state["status"] = "Failed"
+        state["error_message"] = (
+            f"git exited {cpe.returncode}\n"
+            f"stdout:\n{cpe.stdout}\n"
+            f"stderr:\n{cpe.stderr}"
+        )
+
     except Exception as e:
         state["status"] = "Failed"
         state["error_message"] = str(e)
+
     finally:
         if state["repository_path"]:
             shutil.rmtree(os.path.dirname(state["repository_path"]), ignore_errors=True)
