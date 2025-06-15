@@ -17,8 +17,8 @@ GIT_USERNAME = os.getenv("GIT_USERNAME")
 GIT_PAT = os.getenv("GIT_PAT")
 
 
-# logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class CodeGenerationState(TypedDict):
