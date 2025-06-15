@@ -6,13 +6,19 @@ from typing import TypedDict, Optional
 from langgraph.graph import StateGraph, END
 import logging
 import openai
+import time
+import requests
+import ast
+import re
+
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 GIT_USERNAME = os.getenv("GIT_USERNAME")
 GIT_PAT = os.getenv("GIT_PAT")
 
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class CodeGenerationState(TypedDict):
@@ -22,7 +28,7 @@ class CodeGenerationState(TypedDict):
     base_branch: str
     prompt: str
     repository_path: Optional[str]
-    target_code: Optional[str]  # Renamed from target_service_code
+    target_code: Optional[str]
     status: str
     current_step: str
     generated_code: Optional[str]
@@ -90,21 +96,31 @@ def create_feature_branch(state: CodeGenerationState) -> CodeGenerationState:
 
         state["repository_path"] = repo_path
 
+        # Checkout the base branch first
         try:
             subprocess.run(
-                ["git", "checkout", "-b", branch_name, state["base_branch"]],
+                ["git", "checkout", state["base_branch"]],
                 cwd=repo_path,
                 check=True, capture_output=True, text=True
             )
         except subprocess.CalledProcessError:
+            # fallback to alternate branch
             alt = "master" if state["base_branch"] == "main" else "main"
             subprocess.run(
-                ["git", "checkout", "-b", branch_name, alt],
+                ["git", "checkout", alt],
                 cwd=repo_path,
                 check=True, capture_output=True, text=True
             )
             state["base_branch"] = alt
 
+        # Now create and switch to the new feature branch from the checked out base branch
+        subprocess.run(
+            ["git", "checkout", "-b", branch_name],
+            cwd=repo_path,
+            check=True, capture_output=True, text=True
+        )
+
+        # Push the new branch upstream
         subprocess.run(
             ["git", "push", "--set-upstream", "origin", branch_name],
             cwd=repo_path,
@@ -130,11 +146,8 @@ def create_feature_branch(state: CodeGenerationState) -> CodeGenerationState:
         state["status"] = "Failed"
         state["error_message"] = f"BranchCreationError: {str(e)}"
 
-    finally:
-        if state.get("repository_path"):
-            shutil.rmtree(os.path.dirname(state["repository_path"]), ignore_errors=True)
-
     return state
+
 
 def enhanced_repository_analyzer(state: CodeGenerationState) -> CodeGenerationState:
     """Clone the repo and extract a potentially relevant code file based on keywords."""
@@ -147,7 +160,6 @@ def enhanced_repository_analyzer(state: CodeGenerationState) -> CodeGenerationSt
         )
         state["repository_path"] = repo
 
-        # Try to find a file mentioned in the prompt
         match_file = None
         for word in state["prompt"].split():
             if word.endswith((".java", ".ts", ".tsx", ".py", ".js", ".sql", ".yaml")):
@@ -271,6 +283,7 @@ def dynamic_prompt_planner(state: dict) -> dict:
 
     return state
 
+
 def enhanced_code_generator(state: CodeGenerationState) -> CodeGenerationState:
     """Generate code using the refined prompt and optional context."""
     try:
@@ -307,23 +320,238 @@ def enhanced_code_generator(state: CodeGenerationState) -> CodeGenerationState:
         state["error_message"] = f"{type(e).__name__}: {str(e)}"
         logger.error("Code generation failed: %s", state["error_message"])
 
-    if state.get("repository_path"):
-        shutil.rmtree(state["repository_path"], ignore_errors=True)
+    # if state.get("repository_path"):
+    #     shutil.rmtree(state["repository_path"], ignore_errors=True)
     return state
 
-def create_enhanced_workflow():
-    graph = StateGraph(CodeGenerationState)
-    graph.add_node("create_branch", create_feature_branch)
-    graph.add_node("analyze", enhanced_repository_analyzer)
-    graph.add_node("plan", dynamic_prompt_planner)
-    graph.add_node("generate", enhanced_code_generator)
+def commit_generated_code(state: CodeGenerationState) -> CodeGenerationState:
+    try:
+        repo = state["repository_path"]
+        if not repo:
+            raise ValueError("Repository path missing in state")
 
-    graph.set_entry_point("create_branch")
-    graph.add_edge("create_branch","analyze")
-    graph.add_edge("analyze", "plan")
-    graph.add_edge("plan", "generate")
-    graph.add_edge("generate", END)
-    return graph.compile()
+        # Wait/retry to ensure code is generated
+        max_wait_sec = 10
+        waited = 0
+        while (not state.get("generated_code")) and waited < max_wait_sec:
+            logger.debug("Waiting for generated_code to be ready before commit...")
+            time.sleep(1)
+            waited += 1
+
+        code = state.get("generated_code")
+        if not code:
+            raise ValueError("Generated code is missing after wait")
+
+        code_lower = code.lower()
+        is_test_code = any(kw in code_lower for kw in [
+            "test", "assert", "mock", "@test", "unittest", "asserttrue", "assertfalse"
+        ])
+
+        if is_test_code:
+            file_path = "src/test/java/com/marketplace/onlinemarketplace/service/BidServiceTest.java"
+        else:
+            file_path = "src/main/java/com/marketplace/onlinemarketplace/service/BidService.java"   
+
+        logger.info(f"Committing code: repo={repo}, file_path={file_path}, code_present={bool(code)}")
+
+        abs_path = os.path.join(repo, file_path)
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+
+        cleaned_code = sanitize_generated_code(code)
+
+        if os.path.exists(abs_path):
+            with open(abs_path, "r", encoding="utf-8") as f:
+                existing_code = f.read()
+            merged_code = smart_append_code(existing_code, cleaned_code)
+            file_action = "modify"
+        else:
+            merged_code = cleaned_code
+            file_action = "create"
+
+        # Write the result
+        with open(abs_path, "w", encoding="utf-8") as f:
+            f.write(merged_code)
+
+        branch_name = state.get("branch_name")
+        if not branch_name:
+            raise ValueError("Branch name missing in state")
+
+        logger.debug(f"Checking out branch: {branch_name}")
+
+        subprocess.run(["git", "checkout", branch_name], cwd=repo, check=True)
+        subprocess.run(["git", "add", file_path], cwd=repo, check=True)
+
+        commit_msg = f"{file_action.capitalize()} {file_path} for {state['ticket_key']}"
+        subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo, check=True)
+
+        state["file_path"] = file_path
+        state["file_action"] = file_action    
+        state["current_step"] = "code_committed"
+        logger.info("Committed changes to %s", file_path)
+    except Exception as e:
+        state["status"] = "Failed"
+        state["error_message"] = f"CommitError: {type(e).__name__}: {str(e)}"
+        logger.error("Commit failed: %s", state["error_message"])
+    return state
+
+
+def push_changes(state: CodeGenerationState) -> CodeGenerationState:
+    try:
+        repo_path = state["repository_path"]
+        branch_name = state.get("branch_name")
+
+        if not repo_path or not branch_name:
+            raise ValueError("Missing repository path or branch name.")
+
+        subprocess.run(["git", "push", "-u", "origin", branch_name], cwd=repo_path, check=True)
+        state["current_step"] = "code_pushed"
+        logger.info("Pushed changes to branch '%s'", branch_name)
+    except Exception as e:
+        state["status"] = "Failed"
+        state["error_message"] = f"PushError: {type(e).__name__}: {str(e)}"
+        logger.error("Push failed: %s", state["error_message"])
+    return state
+
+def create_pull_request(state: CodeGenerationState) -> CodeGenerationState:
+    try:
+        headers = {
+            "Authorization": f"token {os.getenv('GIT_PAT')}",
+            "Accept": "application/vnd.github+json"
+        }
+
+        repo_url = state["git_url"].replace(".git", "").split("github.com/")[-1]
+        api_url = f"https://api.github.com/repos/{repo_url}/pulls"
+
+        pr_body = f"""This PR was auto-generated for ticket {state['ticket_key']}.
+
+### Prompt
+```
+{state['prompt']}
+```"""
+
+        pr_data = {
+            "title": f"[{state['ticket_key']}] AI-generated implementation",
+            "head": state["branch_name"],
+            "base": state["base_branch"],
+            "body": pr_body
+        }
+
+        response = requests.post(api_url, headers=headers, json=pr_data)
+        response.raise_for_status()
+
+        pr_url = response.json().get("html_url")
+        state["current_step"] = "pull_request_created"
+        state["status"] = "Completed"
+        state["pr_url"] = pr_url
+        logger.info("Pull request created: %s", pr_url)
+
+    except Exception as e:
+        logger.error("Pull request creation failed: %s", str(e))
+        state["status"] = "Failed"
+        state["error_message"] = f"PullRequestError: {type(e).__name__}: {str(e)}"
+    return state
+
+def smart_append_code(existing_code: str, generated_code: str) -> str:
+    existing_lines = existing_code.splitlines()
+    generated_lines = generated_code.splitlines()
+
+    new_imports = [line for line in generated_lines if line.strip().startswith('import')]
+    new_body = [line for line in generated_lines if line not in new_imports]
+
+    import_end_index = 0
+    for i, line in enumerate(existing_lines):
+        if line.strip().startswith('import'):
+            import_end_index = i + 1
+        elif line.strip() == '':
+            continue
+        else:
+            break
+
+    existing_imports = set(line.strip() for line in existing_lines[:import_end_index])
+    unique_new_imports = [line for line in new_imports if line.strip() not in existing_imports]
+
+    full_code = existing_lines[:]
+    try:
+        last_brace_index = max(i for i, line in enumerate(full_code) if line.strip() == "}")
+    except ValueError:
+        last_brace_index = len(full_code)
+
+    new_body_indented = ['    ' + line if line.strip() else line for line in new_body]
+    modified_code = (
+        full_code[:import_end_index]
+        + unique_new_imports
+        + full_code[import_end_index:last_brace_index]
+        + ['']  # spacing
+        + new_body_indented
+        + ['']  # spacing
+        + full_code[last_brace_index:]
+    )
+
+    return '\n'.join(modified_code)
+
+def sanitize_generated_code(code: str) -> str:
+    """
+    Cleans AI-generated code by removing:
+    - Markdown formatting (```java etc)
+    - Leading/trailing whitespace
+    - Common AI comments and noise
+    """
+    lines = code.strip().splitlines()
+
+    if lines and re.match(r"^```.*", lines[0].strip()):
+        lines = lines[1:]
+    if lines and re.match(r"^```", lines[-1].strip()):
+        lines = lines[:-1]
+
+    cleaned_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"//\s*(generated|auto[- ]?generated|created|added)\b", stripped, re.I):
+            continue
+        if re.match(r"#\s*(generated|auto[- ]?generated|created|added)\b", stripped, re.I):
+            continue
+        if stripped.lower().startswith("<!--") and "generated" in stripped.lower():
+            continue
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines).strip()
+
+def cleanup_repository(state: CodeGenerationState):
+    repo_path = state.get("repository_path")
+    if repo_path:
+        try:
+            shutil.rmtree(os.path.dirname(repo_path), ignore_errors=False)
+            logger.info("Temporary repository directory cleaned up: %s", os.path.dirname(repo_path))
+        except Exception as e:
+            logger.error("Error cleaning up repository directory: %s", str(e))    
+
+
+
+def create_enhanced_workflow():
+    builder = StateGraph(CodeGenerationState)
+
+    # Define states in order
+    builder.add_node("detect_branch", lambda state: {**state, "base_branch": detect_default_branch(state["git_url"])})
+    builder.add_node("analyze_repo", enhanced_repository_analyzer)
+    builder.add_node("create_branch", create_feature_branch)
+    builder.add_node("optimize_prompt", dynamic_prompt_planner)
+    builder.add_node("generate_code", enhanced_code_generator)
+    builder.add_node("commit_code", commit_generated_code)
+    builder.add_node("push_changes", push_changes)
+    builder.add_node("create_pr", create_pull_request)
+
+    # Add transitions between steps
+    builder.set_entry_point("detect_branch")
+    builder.add_edge("detect_branch", "analyze_repo")
+    builder.add_edge("analyze_repo", "create_branch")
+    builder.add_edge("create_branch", "optimize_prompt")
+    builder.add_edge("optimize_prompt", "generate_code")
+    builder.add_edge("generate_code", "commit_code")
+    builder.add_edge("commit_code", "push_changes")
+    builder.add_edge("push_changes", "create_pr")
+    builder.add_edge("create_pr", END)
+
+    return builder.compile()
 
 def run_enhanced_code_generation_workflow(session_data: dict) -> dict:
     default_branch = session_data.get("base_branch") or detect_default_branch(session_data["git_url"])
@@ -340,11 +568,14 @@ def run_enhanced_code_generation_workflow(session_data: dict) -> dict:
         "current_step": "starting",
         "generated_code": None,
         "error_message": None,
-        "branch_name": None 
+        "branch_name": None ,
+        "file_path": None,
+        "file_action": None,  
     }
 
     workflow = create_enhanced_workflow()
     final = workflow.invoke(initial)
+    cleanup_repository(final)
 
     return {
         "session_id": final["session_id"],
@@ -352,5 +583,6 @@ def run_enhanced_code_generation_workflow(session_data: dict) -> dict:
         "current_step": final["current_step"],
         "error_message": final.get("error_message"),
         "branch_name": final.get("branch_name"),
-        "generated_code": final.get("generated_code")
+        "generated_code": final.get("generated_code"),
+        "pr_url": final.get("pr_url") 
     }
