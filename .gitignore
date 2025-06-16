@@ -11,6 +11,7 @@ venv/
 # Shell history or system files
 *.log
 .DS_Store
+*.pyc
 
 # Editor settings (optional)
 .vscode/
