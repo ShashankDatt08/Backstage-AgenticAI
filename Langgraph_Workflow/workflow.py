@@ -2,7 +2,7 @@ import os
 import subprocess
 import tempfile
 import shutil
-from typing import TypedDict, Optional
+from typing import TypedDict, Optional, List
 from langgraph.graph import StateGraph, END
 import logging
 import openai
@@ -18,8 +18,8 @@ GIT_PAT = os.getenv("GIT_PAT")
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-# logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
 
 class CodeGenerationState(TypedDict):
     session_id: int
@@ -34,6 +34,11 @@ class CodeGenerationState(TypedDict):
     generated_code: Optional[str]
     error_message: Optional[str]
     branch_name: Optional[str]
+    file_path: Optional[str]
+    file_action: Optional[str]
+    summary: Optional[str]
+    changed_files: List[str]
+    pr_url: Optional[str]
 
 
 def detect_default_branch(git_url: str) -> str:
@@ -66,6 +71,7 @@ def detect_default_branch(git_url: str) -> str:
     except Exception as e:
         logger.warning("Failed to detect default branch: %s", str(e))
         return "main"
+
 
 def create_feature_branch(state: CodeGenerationState) -> CodeGenerationState:
     try:
@@ -193,6 +199,7 @@ def truncate_code(code: str, max_chars: int = 1500) -> str:
         truncated += line + "\n"
     return truncated.strip()
 
+
 def infer_tech_stack(repo_path: str, max_items: int = 5) -> set:
     tech_stack = set()
     if not os.path.exists(repo_path):
@@ -218,6 +225,7 @@ def infer_tech_stack(repo_path: str, max_items: int = 5) -> set:
             if len(tech_stack) >= max_items:
                 return tech_stack
     return tech_stack
+
 
 def dynamic_prompt_planner(state: dict) -> dict:
     """Refine the prompt using LLM, based on context and potential code."""
@@ -315,14 +323,41 @@ def enhanced_code_generator(state: CodeGenerationState) -> CodeGenerationState:
         state["generated_code"] = resp.choices[0].message.content
         state["status"] = "Completed"
         state["current_step"] = "code_generated"
+        
+        # Generate summary of the work done
+        summary_messages = [
+            {
+                "role": "system",
+                "content": "You are a technical writer. Create a concise one-line summary of the work performed."
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Summarize this coding task in one line:\n"
+                    f"Ticket: {state['ticket_key']}\n"
+                    f"Prompt: {state['prompt']}\n"
+                    f"Generated code type: {'Test' if 'Test' in state.get('file_path', '') else 'Production'}"
+                )
+            }
+        ]
+        
+        summary_resp = openai.chat.completions.create(
+            model="gpt-3.5-turbo",
+            temperature=0,
+            max_tokens=100,
+            messages=summary_messages
+        )
+        
+        state["summary"] = summary_resp.choices[0].message.content.strip()
+        logger.info(f"Generated workflow summary: {state['summary']}")
+
     except Exception as e:
         state["status"] = "Failed"
         state["error_message"] = f"{type(e).__name__}: {str(e)}"
         logger.error("Code generation failed: %s", state["error_message"])
-
-    # if state.get("repository_path"):
-    #     shutil.rmtree(state["repository_path"], ignore_errors=True)
+    
     return state
+
 
 def commit_generated_code(state: CodeGenerationState) -> CodeGenerationState:
     try:
@@ -384,6 +419,10 @@ def commit_generated_code(state: CodeGenerationState) -> CodeGenerationState:
         commit_msg = f"{file_action.capitalize()} {file_path} for {state['ticket_key']}"
         subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo, check=True)
 
+        # Track changed files
+        if 'changed_files' not in state:
+            state['changed_files'] = []
+        state['changed_files'].append(file_path)
         state["file_path"] = file_path
         state["file_action"] = file_action    
         state["current_step"] = "code_committed"
@@ -412,6 +451,7 @@ def push_changes(state: CodeGenerationState) -> CodeGenerationState:
         logger.error("Push failed: %s", state["error_message"])
     return state
 
+
 def create_pull_request(state: CodeGenerationState) -> CodeGenerationState:
     try:
         headers = {
@@ -422,12 +462,15 @@ def create_pull_request(state: CodeGenerationState) -> CodeGenerationState:
         repo_url = state["git_url"].replace(".git", "").split("github.com/")[-1]
         api_url = f"https://api.github.com/repos/{repo_url}/pulls"
 
+        # Fix the f-string formatting here
+        changed_files_list = "\n".join(f"- {f}" for f in state.get('changed_files', []))
         pr_body = f"""This PR was auto-generated for ticket {state['ticket_key']}.
 
-### Prompt
-```
-{state['prompt']}
-```"""
+### Summary
+{state.get('summary', 'Implementation of ticket requirements')}
+
+### Changed Files
+{changed_files_list}"""
 
         pr_data = {
             "title": f"[{state['ticket_key']}] AI-generated implementation",
@@ -489,6 +532,7 @@ def smart_append_code(existing_code: str, generated_code: str) -> str:
 
     return '\n'.join(modified_code)
 
+
 def sanitize_generated_code(code: str) -> str:
     """
     Cleans AI-generated code by removing:
@@ -516,6 +560,7 @@ def sanitize_generated_code(code: str) -> str:
 
     return "\n".join(cleaned_lines).strip()
 
+
 def cleanup_repository(state: CodeGenerationState):
     repo_path = state.get("repository_path")
     if repo_path:
@@ -524,7 +569,6 @@ def cleanup_repository(state: CodeGenerationState):
             logger.info("Temporary repository directory cleaned up: %s", os.path.dirname(repo_path))
         except Exception as e:
             logger.error("Error cleaning up repository directory: %s", str(e))    
-
 
 
 def create_enhanced_workflow():
@@ -553,6 +597,7 @@ def create_enhanced_workflow():
 
     return builder.compile()
 
+
 def run_enhanced_code_generation_workflow(session_data: dict) -> dict:
     default_branch = session_data.get("base_branch") or detect_default_branch(session_data["git_url"])
 
@@ -568,9 +613,12 @@ def run_enhanced_code_generation_workflow(session_data: dict) -> dict:
         "current_step": "starting",
         "generated_code": None,
         "error_message": None,
-        "branch_name": None ,
+        "branch_name": None,
         "file_path": None,
-        "file_action": None,  
+        "file_action": None,
+        "summary": None,
+        "changed_files": [],
+        "pr_url": None,
     }
 
     workflow = create_enhanced_workflow()
@@ -584,5 +632,7 @@ def run_enhanced_code_generation_workflow(session_data: dict) -> dict:
         "error_message": final.get("error_message"),
         "branch_name": final.get("branch_name"),
         "generated_code": final.get("generated_code"),
-        "pr_url": final.get("pr_url") 
+        "pr_url": final.get("pr_url"),
+        "summary": final.get("summary"),
+        "changed_files": final.get("changed_files", [])
     }

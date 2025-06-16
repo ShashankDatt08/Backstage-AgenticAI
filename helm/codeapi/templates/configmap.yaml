@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "codeapi.fullname" . }}-config
+  labels:
+    {{- include "codeapi.labels" . | nindent 4 }}
+data:
+  # Add custom environment variables here if needed
+  # EXAMPLE_ENV: "value"

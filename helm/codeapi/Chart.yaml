@@ -1,0 +1,5 @@
+apiVersion: v2
+name: codeapi
+version: 0.1.0
+description: A Helm chart for deploying the CodeApi FastAPI application
+appVersion: "1.0"
