@@ -534,28 +534,20 @@ def smart_append_code(existing_code: str, generated_code: str) -> str:
 
 
 def sanitize_generated_code(code: str) -> str:
-    """
-    Cleans AI-generated code by removing:
-    - Markdown formatting (```java etc)
-    - Leading/trailing whitespace
-    - Common AI comments and noise
-    """
-    lines = code.strip().splitlines()
+    code = code.strip()
+    code = re.sub(r"^```[\w+-]*\n?", "", code)
+    code = re.sub(r"\n?```$", "", code)
 
-    if lines and re.match(r"^```.*", lines[0].strip()):
-        lines = lines[1:]
-    if lines and re.match(r"^```", lines[-1].strip()):
-        lines = lines[:-1]
-
+    lines = code.splitlines()
     cleaned_lines = []
+
     for line in lines:
         stripped = line.strip()
-        if re.match(r"//\s*(generated|auto[- ]?generated|created|added)\b", stripped, re.I):
+
+        # Remove all // or # or <!-- single-line comments
+        if re.match(r"^\s*(//|#|<!--).*", stripped):
             continue
-        if re.match(r"#\s*(generated|auto[- ]?generated|created|added)\b", stripped, re.I):
-            continue
-        if stripped.lower().startswith("<!--") and "generated" in stripped.lower():
-            continue
+
         cleaned_lines.append(line)
 
     return "\n".join(cleaned_lines).strip()
