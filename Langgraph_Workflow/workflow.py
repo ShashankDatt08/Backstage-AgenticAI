@@ -599,6 +599,13 @@ def create_enhanced_workflow():
 
 
 def run_enhanced_code_generation_workflow(session_data: dict) -> dict:
+    # Set global git config for user
+    try:
+        subprocess.run(["git", "config", "--global", "user.email", "Ganesh@infinite.com"], check=True)
+        subprocess.run(["git", "config", "--global", "user.name", "Ganesh"], check=True)
+    except Exception as e:
+        pass  # Ignore errors if already set or in restricted environments
+
     default_branch = session_data.get("base_branch") or detect_default_branch(session_data["git_url"])
 
     initial: CodeGenerationState = {
