@@ -23,5 +23,9 @@ spec:
           env:
             - name: PYTHONUNBUFFERED
               value: "1"
-          resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            - name: OPENAI_API_KEY
+              value: "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"
+            - name: GIT_USERNAME
+              value: "shashankdatt08"
+            - name: GIT_PASSWORD
+              value: "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"
