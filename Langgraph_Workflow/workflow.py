@@ -102,7 +102,6 @@ def create_feature_branch(state: CodeGenerationState) -> CodeGenerationState:
 
         state["repository_path"] = repo_path
 
-        # Checkout the base branch first
         try:
             subprocess.run(
                 ["git", "checkout", state["base_branch"]],
@@ -110,7 +109,6 @@ def create_feature_branch(state: CodeGenerationState) -> CodeGenerationState:
                 check=True, capture_output=True, text=True
             )
         except subprocess.CalledProcessError:
-            # fallback to alternate branch
             alt = "master" if state["base_branch"] == "main" else "main"
             subprocess.run(
                 ["git", "checkout", alt],
@@ -119,14 +117,12 @@ def create_feature_branch(state: CodeGenerationState) -> CodeGenerationState:
             )
             state["base_branch"] = alt
 
-        # Now create and switch to the new feature branch from the checked out base branch
         subprocess.run(
             ["git", "checkout", "-b", branch_name],
             cwd=repo_path,
             check=True, capture_output=True, text=True
         )
 
-        # Push the new branch upstream
         subprocess.run(
             ["git", "push", "--set-upstream", "origin", branch_name],
             cwd=repo_path,
@@ -156,7 +152,6 @@ def create_feature_branch(state: CodeGenerationState) -> CodeGenerationState:
 
 
 def enhanced_repository_analyzer(state: CodeGenerationState) -> CodeGenerationState:
-    """Clone the repo and extract a potentially relevant code file based on keywords."""
     try:
         temp = tempfile.mkdtemp()
         repo = os.path.join(temp, "repo")
@@ -228,7 +223,6 @@ def infer_tech_stack(repo_path: str, max_items: int = 5) -> set:
 
 
 def dynamic_prompt_planner(state: dict) -> dict:
-    """Refine the prompt using LLM, based on context and potential code."""
     try:
         if not state.get("prompt"):
             raise ValueError("Missing required user story in state['prompt']")
@@ -293,7 +287,6 @@ def dynamic_prompt_planner(state: dict) -> dict:
 
 
 def enhanced_code_generator(state: CodeGenerationState) -> CodeGenerationState:
-    """Generate code using the refined prompt and optional context."""
     try:
         messages = [
             {
@@ -309,7 +302,6 @@ def enhanced_code_generator(state: CodeGenerationState) -> CodeGenerationState:
             },
             {"role": "user", "content": f"{state['prompt']}"}
         ]
-
         if state.get("target_code"):
             messages.append({"role": "user", "content": f"Relevant code:\n{state['target_code']}"})
 
@@ -323,34 +315,41 @@ def enhanced_code_generator(state: CodeGenerationState) -> CodeGenerationState:
         state["generated_code"] = resp.choices[0].message.content
         state["status"] = "Completed"
         state["current_step"] = "code_generated"
-        
-        # Generate summary of the work done
+        file_path = state.get('file_path') or ''
+        generated_code = state.get('generated_code') or ''
+        acceptance_criteria = state.get('acceptance_criteria') or ''
         summary_messages = [
             {
                 "role": "system",
-                "content": "You are a technical writer. Create a concise one-line summary of the work performed."
+                "content": "You are a technical writer. Create a concise two-line summary of the work performed. The summary should clearly describe what was implemented or changed, not just that code was generated."
             },
             {
                 "role": "user",
                 "content": (
-                    f"Summarize this coding task in one line:\n"
+                    f"Summarize this coding task in two lines:\n"
                     f"Ticket: {state['ticket_key']}\n"
                     f"Prompt: {state['prompt']}\n"
-                    f"Generated code type: {'Test' if 'Test' in state.get('file_path', '') else 'Production'}"
+                    f"File(s) changed: {file_path}\n"
+                    f"Code diff or main changes: {generated_code[:500]}\n"
+                    f"Acceptance criteria: {acceptance_criteria}\n"
+                    f"Generated code type: {'Test' if 'Test' in file_path else 'Production'}\n"
+                    f"If possible, mention the main function, class, or feature added or modified."
                 )
             }
         ]
-        
-        summary_resp = openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            temperature=0,
-            max_tokens=100,
-            messages=summary_messages
-        )
-        
-        state["summary"] = summary_resp.choices[0].message.content.strip()
-        logger.info(f"Generated workflow summary: {state['summary']}")
-
+        try:
+            summary_resp = openai.chat.completions.create(
+                model="gpt-4o",
+                temperature=0,
+                max_tokens=1024,
+                messages=summary_messages
+            )
+            summary_text = summary_resp.choices[0].message.content.strip() if summary_resp.choices else ""
+            state["summary"] = summary_text or "No summary generated by LLM."
+            logger.info(f"Generated workflow summary: {state['summary']}")
+        except Exception as summary_exc:
+            state["summary"] = "No summary generated due to error."
+            logger.error(f"Summary generation failed: {summary_exc}")
     except Exception as e:
         state["status"] = "Failed"
         state["error_message"] = f"{type(e).__name__}: {str(e)}"
@@ -365,7 +364,6 @@ def commit_generated_code(state: CodeGenerationState) -> CodeGenerationState:
         if not repo:
             raise ValueError("Repository path missing in state")
 
-        # Wait/retry to ensure code is generated
         max_wait_sec = 10
         waited = 0
         while (not state.get("generated_code")) and waited < max_wait_sec:
@@ -377,7 +375,7 @@ def commit_generated_code(state: CodeGenerationState) -> CodeGenerationState:
         if not code:
             raise ValueError("Generated code is missing after wait")
 
-        code_lower = code.lower()
+        code_lower = code.lower() if code else ""
         is_test_code = any(kw in code_lower for kw in [
             "test", "assert", "mock", "@test", "unittest", "asserttrue", "assertfalse"
         ])
@@ -392,7 +390,7 @@ def commit_generated_code(state: CodeGenerationState) -> CodeGenerationState:
         abs_path = os.path.join(repo, file_path)
         os.makedirs(os.path.dirname(abs_path), exist_ok=True)
 
-        cleaned_code = sanitize_generated_code(code)
+        cleaned_code = sanitize_generated_code(code or "")
 
         if os.path.exists(abs_path):
             with open(abs_path, "r", encoding="utf-8") as f:
@@ -403,7 +401,6 @@ def commit_generated_code(state: CodeGenerationState) -> CodeGenerationState:
             merged_code = cleaned_code
             file_action = "create"
 
-        # Write the result
         with open(abs_path, "w", encoding="utf-8") as f:
             f.write(merged_code)
 
@@ -419,10 +416,45 @@ def commit_generated_code(state: CodeGenerationState) -> CodeGenerationState:
         commit_msg = f"{file_action.capitalize()} {file_path} for {state['ticket_key']}"
         subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo, check=True)
 
-        # Track changed files
         if 'changed_files' not in state:
             state['changed_files'] = []
-        state['changed_files'].append(file_path)
+        try:
+            diff_output = subprocess.check_output([
+                "git", "diff", "HEAD~1", "--numstat"
+            ], cwd=repo, text=True)
+            changed_files = []
+            for line in diff_output.strip().splitlines():
+                parts = line.split()
+                if len(parts) == 3:
+                    additions, deletions, path = parts
+                    try:
+                        additions = int(additions)
+                    except Exception:
+                        additions = 0
+                    try:
+                        deletions = int(deletions)
+                    except Exception:
+                        deletions = 0
+                    changed_files.append({
+                        "file_path": path,
+                        "additions": additions,
+                        "deletions": deletions
+                    })
+            if changed_files:
+                state['changed_files'] = changed_files
+            else:
+                state['changed_files'] = [{
+                    "file_path": file_path,
+                    "additions": 0,
+                    "deletions": 0
+                }]
+        except Exception as diff_exc:
+            logger.warning(f"Could not get diff stats: {diff_exc}")
+            state['changed_files'] = [{
+                "file_path": file_path,
+                "additions": 0,
+                "deletions": 0
+            }]
         state["file_path"] = file_path
         state["file_action"] = file_action    
         state["current_step"] = "code_committed"
@@ -462,7 +494,6 @@ def create_pull_request(state: CodeGenerationState) -> CodeGenerationState:
         repo_url = state["git_url"].replace(".git", "").split("github.com/")[-1]
         api_url = f"https://api.github.com/repos/{repo_url}/pulls"
 
-        # Fix the f-string formatting here
         changed_files_list = "\n".join(f"- {f}" for f in state.get('changed_files', []))
         pr_body = f"""This PR was auto-generated for ticket {state['ticket_key']}.
 
@@ -524,9 +555,9 @@ def smart_append_code(existing_code: str, generated_code: str) -> str:
         full_code[:import_end_index]
         + unique_new_imports
         + full_code[import_end_index:last_brace_index]
-        + ['']  # spacing
+        + ['']  
         + new_body_indented
-        + ['']  # spacing
+        + [''] 
         + full_code[last_brace_index:]
     )
 
@@ -544,7 +575,6 @@ def sanitize_generated_code(code: str) -> str:
     for line in lines:
         stripped = line.strip()
 
-        # Remove all // or # or <!-- single-line comments
         if re.match(r"^\s*(//|#|<!--).*", stripped):
             continue
 
@@ -566,7 +596,6 @@ def cleanup_repository(state: CodeGenerationState):
 def create_enhanced_workflow():
     builder = StateGraph(CodeGenerationState)
 
-    # Define states in order
     builder.add_node("detect_branch", lambda state: {**state, "base_branch": detect_default_branch(state["git_url"])})
     builder.add_node("analyze_repo", enhanced_repository_analyzer)
     builder.add_node("create_branch", create_feature_branch)
@@ -576,7 +605,6 @@ def create_enhanced_workflow():
     builder.add_node("push_changes", push_changes)
     builder.add_node("create_pr", create_pull_request)
 
-    # Add transitions between steps
     builder.set_entry_point("detect_branch")
     builder.add_edge("detect_branch", "analyze_repo")
     builder.add_edge("analyze_repo", "create_branch")
@@ -591,12 +619,11 @@ def create_enhanced_workflow():
 
 
 def run_enhanced_code_generation_workflow(session_data: dict) -> dict:
-    # Set global git config for user
     try:
         subprocess.run(["git", "config", "--global", "user.email", "Ganesh@infinite.com"], check=True)
         subprocess.run(["git", "config", "--global", "user.name", "Ganesh"], check=True)
     except Exception as e:
-        pass  # Ignore errors if already set or in restricted environments
+        pass  
 
     default_branch = session_data.get("base_branch") or detect_default_branch(session_data["git_url"])
 

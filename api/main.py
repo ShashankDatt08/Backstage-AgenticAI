@@ -8,7 +8,6 @@ import threading
 import time
 from typing import Optional, List, Dict, Any
 
-# Allow import of your workflow
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from Langgraph_Workflow.workflow import run_enhanced_code_generation_workflow
 
@@ -17,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Agentic Automation API - GENERIC LangGraph")
 
-# CORS for Backstage
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,9 +24,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory sessions store
 sessions: Dict[int, Dict[str, Any]] = {}
 counter = 0
+
+class ChangedFile(BaseModel):
+    file_path: str
+    additions: int = 0
+    deletions: int = 0
 
 class CreateSessionRequest(BaseModel):
     ticketKey: constr(min_length=1)
@@ -43,7 +45,7 @@ class SessionStatusResponse(BaseModel):
     current_step: str
     created_at: float
     summary: Optional[str] = None
-    changed_files: List[str] = []
+    changed_files: List[ChangedFile] = []
     pr_url: Optional[str] = None
     error_message: Optional[str] = None
     branch_name: Optional[str] = None
@@ -54,12 +56,9 @@ class CreateSessionResponse(BaseModel):
     message: str
 
 def background_worker(session_id: int):
-    """Background worker that executes the workflow and updates session state"""
     try:
         session = sessions[session_id]
         logger.info(f"Starting workflow for session {session_id}")
-        
-        # Run the workflow with current session data
         results = run_enhanced_code_generation_workflow({
             "session_id": session_id,
             "ticket_key": session["ticket_key"],
@@ -67,8 +66,7 @@ def background_worker(session_id: int):
             "base_branch": session["base_branch"],
             "prompt": session["prompt"]
         })
-        
-        # Update session with results
+        logger.info(f"Workflow results: {results}")
         session.update({
             "status": results["status"],
             "current_step": results["current_step"],
@@ -77,12 +75,9 @@ def background_worker(session_id: int):
             "pr_url": results.get("pr_url"),
             "branch_name": results.get("branch_name")
         })
-        
         if "error_message" in results:
             session["error_message"] = results["error_message"]
-        
         logger.info(f"Completed workflow for session {session_id}")
-        
     except Exception as e:
         logger.error(f"Error in workflow for session {session_id}: {str(e)}")
         sessions[session_id].update({
@@ -95,8 +90,6 @@ def create_session(req: CreateSessionRequest):
     global counter
     counter += 1
     session_id = counter
-
-    # Initialize session state
     sessions[session_id] = {
         "session_id": session_id,
         "ticket_key": req.ticketKey,
@@ -112,15 +105,12 @@ def create_session(req: CreateSessionRequest):
         "error_message": None,
         "branch_name": None
     }
-
-    # Start background worker
     thread = threading.Thread(
         target=background_worker,
         args=(session_id,),
         daemon=True
     )
     thread.start()
-
     return CreateSessionResponse(
         session_id=session_id,
         status="Pending",
