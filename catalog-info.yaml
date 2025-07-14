@@ -1,0 +1,15 @@
+```yaml
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: backstage-agenticai
+  description: A software component for managing and integrating AI capabilities within the Backstage platform.
+  annotations:
+    github.com/project-slug: ShashankDatt08/Backstage-AgenticAI
+    jira/project-key: 
+    jira/label: backstage-component:backstage-agenticai
+spec:
+  type: application
+  owner: ICS
+  lifecycle: experimental
+```
